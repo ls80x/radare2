@@ -2,7 +2,6 @@
 
 #include <r_debug.h>
 #include <sys/uio.h>
-#include <bits/uio.h>
 #include <sys/ptrace.h>
 #include "linux_coredump.h"
 
@@ -352,7 +351,7 @@ static bool dump_this_map(char *buff_smaps, ut64 start_addr, ut64 end_addr, bool
 		}
 	}
 
-	if (!flags_str && !found) {
+	if (!flags_str || !found) {
 		/* if we don't have VmFlags, just dump it. I'll fix it later on */
 		eprintf ("VmFlags: not found\n");
 		free (identity);
@@ -961,40 +960,44 @@ static void show_maps(linux_map_entry_t *head) {
 	eprintf ("SHOW MAPS ===================\n");
 }
 
-static bool dump_elf_map_content(RBuffer *dest, linux_map_entry_t *head, pid_t pid) {
+static bool dump_elf_map_content(RDebug *dbg, RBuffer *dest, linux_map_entry_t *head, pid_t pid) {
 	linux_map_entry_t *p;
-	struct iovec local;
-	struct iovec remote;
-	char *map_content;
+	ut8 *map_content;
 	size_t size;
 	size_t rbytes;
 
 	for (p = head; p; p = p->n) {
-		//eprintf ("Trying to dump: %s - %"PFMT64x"\n", p->name, p->start_addr);
-		if (p->dumpeable) {
-			size = p->end_addr - p->start_addr;
-			map_content = malloc (size);
-			if (map_content == NULL) {
-				eprintf ("dump_elf_map_content: map_content == NULL\n");
-				return false;
-			}
-
-			eprintf ("p->name: %s - %"PFMT64x" to %p - size: %ld\n",
-				p->name, p->start_addr, map_content, size);
-			local.iov_base = (void *)map_content;
-			local.iov_len = size;
-			remote.iov_base = (void *)p->start_addr;
-			remote.iov_len = size;
-			rbytes = process_vm_readv (pid, &local, 1, &remote, 1, 0);
-			eprintf ("dump_elf_map_content: rbytes: %ld\n", rbytes);
-			if (rbytes != size) {
-				eprintf ("dump_elf_map_content: size not equal\n");
-				perror ("process_vm_readv");
-			} else {
-				r_buf_append_bytes (dest, (const ut8*)map_content, size);
-			}
-			free (map_content);
+		if (!p->dumpeable) {
+			continue;
 		}
+		//eprintf ("Trying to dump: %s - %"PFMT64x"\n", p->name, p->start_addr);
+		size = p->end_addr - p->start_addr;
+		map_content = malloc (size);
+		if (map_content == NULL) {
+			eprintf ("dump_elf_map_content: map_content == NULL\n");
+			return false;
+		}
+#if 0
+	// This thing requires Linux 3.2 
+	struct iovec local;
+	struct iovec remote;
+		eprintf ("p->name: %s - %"PFMT64x" to %p - size: %ld\n",
+			p->name, p->start_addr, map_content, size);
+		local.iov_base = (void *)map_content;
+		local.iov_len = size;
+		remote.iov_base = (void *)p->start_addr;
+		remote.iov_len = size;
+		rbytes = process_vm_readv (pid, &local, 1, &remote, 1, 0);
+		eprintf ("dump_elf_map_content: rbytes: %ld\n", rbytes);
+#endif
+		rbytes = dbg->iob.read_at (dbg->iob.io, p->start_addr, map_content, size);
+		if (rbytes != size) {
+			eprintf ("dump_elf_map_content: size not equal\n");
+			perror ("process_vm_readv");
+		} else {
+			r_buf_append_bytes (dest, (const ut8*)map_content, size);
+		}
+		free (map_content);
 	}
 	return true;
 }
@@ -1144,7 +1147,7 @@ static Elf64_Shdr *get_extra_sectionhdr(Elf64_Ehdr *elf_hdr, st64 offset, int n_
 	if (!shdr) return NULL;
 	eprintf ("get_extra_sectionhdr\n");
 	elf_hdr->e_shoff = offset;
-	elf_hdr->e_shentsize = sizeof (shdr);
+	elf_hdr->e_shentsize = sizeof (Elf64_Shdr);
 	elf_hdr->e_shnum = 1;
 	elf_hdr->e_shstrndx = SHN_UNDEF;
 	shdr->sh_type = SHT_NULL;
@@ -1230,7 +1233,7 @@ bool linux_generate_corefile (RDebug *dbg, RBuffer *dest) {
 	offset = hdr_size + (elf_hdr->e_phnum * elf_hdr->e_phentsize);
 	/* Write to file */
 	(void)dump_elf_pheaders (dest, sec_note, &offset);
-	(void)dump_elf_map_content (dest, sec_note->maps, dbg->pid);
+	(void)dump_elf_map_content (dbg, dest, sec_note->maps, dbg->pid);
 	if (elf_hdr->e_phnum == PN_XNUM) {
 		(void)dump_elf_sheader_pxnum (dest, shdr_pxnum);
 	}
